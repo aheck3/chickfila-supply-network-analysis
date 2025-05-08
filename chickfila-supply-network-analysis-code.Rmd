@@ -1,0 +1,396 @@
+---
+title: "group_11_cfa_supply_code"
+author: "Grace Robinson, Alex Heck, Cooper Foster"
+date: "2025-04-29"
+output: html_document
+---
+
+```{r}
+library(dplyr)
+library(purrr)
+library(geosphere)
+library(igraph)
+library(tidyverse)
+
+set.seed(22)
+
+load('/Users/golfe/OneDrive/Desktop/network_project/cfa_nodes.rda')
+
+load('/Users/golfe/OneDrive/Desktop/network_project/cfa_edges.rda')
+
+head(cfa_nodes)
+head(edgelist)
+
+```
+
+```{r}
+#de-duplicate nodes and edges
+
+cfa_nodes_graph <- cfa_nodes %>%
+  distinct(id, .keep_all = TRUE) %>%    
+  rename(store_name = name) %>%           
+  mutate(                                  
+    id   = as.character(id),               
+    name = id                              
+  ) %>%
+  select(name, store_name, zipcode, lat, lng)
+
+edges_graph <- edgelist %>%
+  distinct(ego_id, alter_id, .keep_all = TRUE) %>%  
+  rename(
+    from = ego_id,
+    to   = alter_id
+  ) %>%
+  mutate(
+    from = as.character(from),
+    to   = as.character(to)
+  )
+
+
+```
+
+First, we will test three different cutoff parameters. These were selected by visualizing different radii on existing DCs and stores, and determining what could be logical values.
+
+```{r}
+#set test cutoff params
+
+cutoff_200 <- 200
+cutoff_300 <- 300
+cutoff_500 <- 500
+
+```
+
+```{r}
+#cluster the cut down networks
+
+edges_200 <- edges_graph %>% 
+  filter(dist < cutoff_200)
+
+net_200   <- graph_from_data_frame(edges_200,directed = FALSE,vertices = cfa_nodes_graph)
+s_net_200 <- simplify(net_200)
+is_simple(s_net_200)  
+
+clv_200 <- cluster_louvain(s_net_200)
+sizes(clv_200)        
+modularity(clv_200) 
+
+
+```
+
+```{r}
+edges_300 <- edges_graph %>% 
+  filter(dist < cutoff_300)
+
+net_300   <- graph_from_data_frame(edges_300,directed = FALSE,vertices = cfa_nodes_graph)
+s_net_300 <- simplify(net_300)
+is_simple(s_net_300)  
+
+clv_300 <- cluster_louvain(s_net_300)
+sizes(clv_300)        
+modularity(clv_300) 
+
+
+```
+
+```{r}
+edges_500 <- edges_graph %>% 
+  filter(dist < cutoff_500)
+
+net_500   <- graph_from_data_frame(edges_500,directed = FALSE,vertices = cfa_nodes_graph)
+s_net_500 <- simplify(net_500)
+is_simple(s_net_500)  
+
+clv_500 <- cluster_louvain(s_net_500)
+sizes(clv_500)        
+modularity(clv_500) 
+
+
+```
+
+```{r}
+results <- data.frame(
+  cutoff     = c(200, 300, 500),
+  n_commun   = c(
+    length(clv_200),
+    length(clv_300),
+    length(clv_500)
+  ),
+  modularity = c(
+    modularity(clv_200),
+    modularity(clv_300),
+    modularity(clv_500)
+  )
+)
+print(results)
+
+
+```
+
+For a less dense cutoff (larger cutoff), we see a smaller number of communities. For a more dense (smaller cutoff), we see more communities. This intuitively makese sense. Modularities scores are appropriate.
+
+```{r}
+#isolate the cluster membership vectors for each scenario, and bind to the nodelist as an attribute (mainly for tableau visualizations and some code below)
+
+membership_vec_300 <- clv_300$membership
+membership_vec_500 <- clv_500$membership
+membership_vec_200 <- clv_200$membership
+
+
+stopifnot(
+  length(membership_vec_200) == nrow(cfa_nodes),
+  length(membership_vec_300) == nrow(cfa_nodes),
+  length(membership_vec_500) == nrow(cfa_nodes)
+)
+
+cfa_nodes <- cbind(
+  cfa_nodes,
+  membership200 = membership_vec_200,
+  membership300 = membership_vec_300,
+  membership500 = membership_vec_500
+)
+
+head(cfa_nodes)
+
+```
+
+The method of trying three cutoffs provided mixed results, so we will now go through a range of cutoff parameters between 50kms to 500kms to see what the optimal cutoff point is across the country. The code below loops through these cutoffs, and checks how many stores fall into a DC's local cluster versus how many actual stores that DC serves. We will then choose the cutoff with lowest possible average error.
+
+*Parts of the code below were generated using OpenAI's o3 model. 
+
+```{r}
+#reference df showing which cluster each DC will belong to
+dc_ref <- read.csv('/Users/golfe/OneDrive/Desktop/network_project/dc_ref.csv')
+
+
+nodes_tbl <- cfa_nodes_graph %>%
+             mutate(id = as.character(name))
+
+edges_tbl <- edges_graph %>%                 # keep only what we need
+             transmute(from     = as.character(from),
+                       to       = as.character(to),
+                       dist_km  = dist)
+
+dc_tbl    <- dc_ref %>%
+             mutate(nearby_id = as.character(nearby))
+
+### Run through cutoff params 50-500kms, iterations of 1km, calculating absolute error for each DC and average error for each cutoff value
+
+max_cut   <- 500
+g         <- graph_from_data_frame(
+               dplyr::filter(edges_tbl, dist_km <= max_cut),
+               directed = FALSE,
+               vertices = nodes_tbl)
+
+E(g)$dist_km <- E(g)$dist_km   # keep distance on the edge for later deletions
+
+### 2.  Helper to evaluate clustering error for one graph ------------------
+evaluate_dc <- function(graph, dc_lookup) {
+  lv <- cluster_louvain(graph)               # un-weighted; drop “weights = …”
+
+  memb <- membership(lv)
+  sizes <- sizes(lv)
+
+  dc_lookup %>% 
+    transmute(dc,
+              served,
+              cluster   = memb[nearby_id],
+              clust_n   = sizes[as.character(cluster)],
+              abs_err   = abs(clust_n - served)) %>% 
+    select(dc, abs_err)
+}
+
+### 3.  Iterate from 500 → 150 km, pruning edges on the fly ----------------
+cutoffs <- seq(500, 50, by = -1)
+
+results <- vector("list", length(cutoffs))
+
+prev_cut <- max_cut
+for (i in seq_along(cutoffs)) {
+
+  this_cut <- cutoffs[i]
+
+  # -- drop only the edges that have just become “too long”
+  if (this_cut < prev_cut) {
+    edges_to_drop <- E(g)[dist_km > this_cut & dist_km <= prev_cut]
+    if (length(edges_to_drop)) g <- delete_edges(g, edges_to_drop)
+  }
+
+  # -- evaluate Louvain error for the 13 DCs
+  dc_err <- evaluate_dc(g, dc_tbl) %>% 
+            pivot_wider(names_from  = dc,
+                        values_from = abs_err,
+                        names_prefix = "abs_err_") %>% 
+            mutate(cutoff = this_cut, .before = 1)
+
+  # -- quick sanity check: how many communities did Louvain find?
+  com_count <- length(unique(membership(cluster_louvain(g))))
+  dc_err    <- dc_err %>% mutate(n_communities = com_count)
+
+  results[[i]] <- dc_err
+  prev_cut     <- this_cut                        # slide window for next loop
+}
+
+results_df <- bind_rows(results) %>% 
+              mutate(overall_mae = rowMeans(select(., starts_with("abs_err_")),
+                                            na.rm = TRUE))
+
+head(dc_ref)
+head(results_df)
+
+res <- results_df %>% 
+  filter(overall_mae == min(overall_mae))
+res
+```
+76km generated the lowest error across the cutoff values, apparently nailing the shape of some local DCs like the Mebane location. Of course, this does not mean the actual stores served by Mebane matchup 1-to-1 with the stores in the Mebane cluster that we ran, but the results are still encouraging. For simplicity's sake, we selected 75km as our optimal cutoff point.
+
+Now, we'll rerun the clustering at 75km, and append that to the nodelist as an attribute.
+
+
+```{r}
+edges_75 <- edges_graph %>% 
+  filter(dist < 75)
+
+net_75   <- graph_from_data_frame(edges_75,directed = FALSE,vertices = cfa_nodes_graph)
+s_net_75 <- simplify(net_75)
+is_simple(s_net_75)  
+
+clv_75 <- cluster_louvain(s_net_75)
+sizes(clv_75)        
+modularity(clv_75) 
+
+```
+
+```{r}
+membership_vec_75 <- clv_75$membership
+
+cfa_nodes <- cbind(
+  cfa_nodes,
+  membership75 = membership_vec_75
+)
+
+head(cfa_nodes)
+summary(cfa_nodes$membership75)
+
+```
+
+The 75km cutoff generated more than 140 communities, which is actually 98 communities when removing isolate stores. We care about the thirteen communities that are linked to a DC, so we will pull those out to make individual network objects that we can then include the DC as a node in that network.
+
+*Code below generated with o3. Technical note: a DC's cluster is determined by the cluster the closest store belongs to.
+
+```{r}
+
+comm_list <- as.numeric(dc_ref$cluster_75)
+
+filtered_nodes <- cfa_nodes %>%
+  filter(membership75 %in% comm_list) %>% 
+  select(name, zipcode, id, lat, lng, membership75)
+
+## ── 3.  Split into 13 data-frames  (a named list) ────────────────────────
+comm_dfs <- filtered_nodes %>% 
+  group_split(membership75) %>%                     # 13 tibbles
+  set_names(paste0("comm_", sort(comm_list)))       # friendlier names
+
+## ── 4.  (Optional) put them in the global environment  ───────────────────
+##      – only do this if you really need stand-alone objects
+list2env(comm_dfs, envir = .GlobalEnv)
+
+```
+
+Below, we'll join the DCs as nodes in their respective community. We'll set a DC attribute flag to determine which node in each community is the DC, and use a zipcode utility dataframe with lat/lng coords for the new distance calculations to form new edgelists for each community.
+
+```{r}
+zips <- read.csv('/Users/golfe/OneDrive/Desktop/network_project/zip_list.csv')
+zips$zipcode <- zips$zip
+
+comm_dfs <- map(comm_dfs, ~ mutate(.x,
+                                   id    = as.character(id),   # <- CHANGE
+                                   is_dc = 0))
+
+dc_nodes <- dc_ref %>%                       # 13 rows
+  rename(name         = dc,
+         zipcode      = zip,
+         membership75 = cluster_75) %>%
+  left_join(zips %>% select(zipcode, lat, lng), by = "zipcode") %>%
+  mutate(id    = paste0("DC_", row_number()),  # already character
+         is_dc = 1) %>%
+  select(name, zipcode, id, lat, lng, membership75, is_dc)
+
+## ── 1.  append the right DC to each community tibble ─────────────────────
+comm_dfs2 <- imap(comm_dfs, function(store_df, list_name) {
+  
+  comm_id <- unique(store_df$membership75)      # e.g. 106
+  stopifnot(length(comm_id) == 1)
+  
+  dc_row  <- dc_nodes %>% filter(membership75 == comm_id)
+  
+  bind_rows(store_df, dc_row)                   # types now line up
+})
+
+## ── 2.  (optional) expose as stand-alone objects again ───────────────────
+list2env(comm_dfs2, envir = .GlobalEnv)
+```
+
+Now we'll calculate the closeness centrality of each DC in its community network, using distance as a weight. Finally, we'll pull these values into a distint results dataframe, converting the normalized closeness metric to kms, and then to miles (since this is a simpler metric to present our findings).
+
+```{r}
+eps <- 1e-6          # add 1 mm to every distance to avoid 0-division (since stores in same zip as DC would have 0 distance otherwise)
+
+# ── helper: full edge list for one community ──────────────────────────────
+build_edges <- function(nodes_df) {
+  coords <- nodes_df %>% select(lng, lat)                 # lon, lat order
+  dmat   <- distm(coords, fun = distHaversine) / 1000     # km
+  
+  idx <- which(lower.tri(dmat), arr.ind = TRUE)           # row-col pairs
+  
+  tibble(
+    from     = as.character(nodes_df$id[idx[, "row"]]),
+    to       = as.character(nodes_df$id[idx[, "col"]]),
+    dist_km  = dmat[lower.tri(dmat)]
+  )
+}
+
+# ── 1.  build edge lists for all 13 communities ──────────────────────────
+edge_lists <- map(comm_dfs2, build_edges)
+
+# ── 2.  graph + closeness for the DC in each community ───────────────────
+dc_closeness <- imap_dfr(edge_lists, function(edges, nm) {
+  
+  verts <- comm_dfs2[[nm]] %>% 
+    mutate(id = as.character(id)) %>% 
+    rename(store_label = name) %>%        # keep nice label
+    relocate(id, .before = 1) %>% 
+    rename(name = id)                     # igraph key MUST be "name"
+  
+  g <- graph_from_data_frame(edges,
+                             directed = FALSE,
+                             vertices = verts)
+  
+  # edge length = geographical distance (+ eps to avoid 0)
+  E(g)$length <- E(g)$dist_km + eps
+  
+  # igraph treats 'weights' as *lengths* for shortest-path metrics
+  V(g)$close_raw  <- closeness(g, weights = E(g)$length,
+                               normalized = FALSE)
+  V(g)$close_norm <- closeness(g, weights = E(g)$length,
+                               normalized = TRUE)
+  
+  dc_v <- V(g)[is_dc == 1]
+  
+  tibble(
+    community     = nm,
+    dc_store      = dc_v$store_label,
+    n_vertices    = gorder(g),
+    closeness_raw = dc_v$close_raw,   #  (n-1) / Σ distances
+    closeness_norm= dc_v$close_norm   #  igraph’s rescale to (0,1]
+  )
+})
+
+dc_closeness <- dc_closeness %>% 
+  mutate(act_dist = 1 / closeness_norm) %>% 
+  mutate(act_dist_m = act_dist * .6214)
+
+dc_closeness
+
+
+```
+
