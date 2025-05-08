@@ -71,7 +71,7 @@ To better understand what these distances look like geographically, we used **Go
 
 These initial tests helped us understand how network density varies by region and informed our later decision to search for an optimal cutoff.
 
-![Clustering Cutoff Selection](images/clustering-cutoff-selection.png)
+![Clustering Cutoff Selection](images/clustering-cutoff-selection.jpg)
 
 ---
 
