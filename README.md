@@ -30,6 +30,14 @@ Chick-fil-A Supply launched in **2019** to vertically integrate and streamline t
 
 ---
 
+## What is Chick-fil-A Supply?
+
+Chick-fil-A Supply is a logistics-focused subsidiary launched in 2019 to streamline the brand’s vertically integrated supply chain. The company operates distribution centers (DCs) that serve hundreds of restaurants across the United States. As of 2025, there are 13 confirmed DCs — 10 operational and 3 in development.
+
+![Current Distribution Centers](images/cfa-current-supply.jpg)
+*Figure: Geographic locations of existing Chick-fil-A Supply distribution centers.*
+
+
 ## Network Structure
 
 - **Nodes**: All U.S. Chick-fil-A restaurant locations (scraped from Chick-fil-A’s website)  
@@ -51,11 +59,19 @@ Chick-fil-A Supply launched in **2019** to vertically integrate and streamline t
 
 ---
 
-## Clustering: Initial Cutoffs
+### Clustering and Initial Cutoffs
 
-We explored clustering scenarios using radius thresholds of 200km, 300km, and 500km. Higher thresholds led to fewer clusters and lower modularity.
+We began by testing three logical distance thresholds — 200 km, 300 km, and 500 km — to define network boundaries and observe how store communities form under different assumptions.
 
-![Community Cutoff Comparison](images/cfa-current-supply.jpg)
+To better understand what these distances look like geographically, we used **Google Earth** to visualize the radius around three operating distribution centers. This helped us confirm that our chosen cutoffs were reasonable based on regional store density.
+
+- **200 km**: 30 communities – Cartersville, GA  
+- **300 km**: 15 communities – Weston, FL  
+- **500 km**: 7 communities – Kansas City, MO  
+
+These initial tests helped us understand how network density varies by region and informed our later decision to search for an optimal cutoff.
+
+![Clustering Cutoff Selection](images/clustering-cutoff-selection.png)
 
 ---
 
